@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Monster Truck!</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; user-select: none; }
+  canvas { display: block; }
+
+  #ui {
+    position: fixed; top: 0; left: 0; right: 0;
+    display: flex; justify-content: center; padding: 14px;
+    pointer-events: none; z-index: 10;
+  }
+  #stars { font-size: 52px; text-shadow: 0 2px 8px #000; letter-spacing: 4px; }
+
+  #cambox {
+    position: fixed; bottom: 10px; right: 10px;
+    width: 160px; height: 120px; border: 3px solid #ff0;
+    border-radius: 8px; overflow: hidden; z-index: 20; opacity: 0.7;
+  }
+  #cambox video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+
+  /* Sound toggle */
+  #soundBtn {
+    position: fixed; top: 12px; left: 12px;
+    font-size: 30px; background: rgba(0,0,0,0.65);
+    border: 2px solid rgba(255,255,255,0.5); border-radius: 50%;
+    width: 52px; height: 52px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 25; transition: transform 0.1s;
+  }
+  #soundBtn:active { transform: scale(0.9); }
+
+  /* Car selector */
+  #carSelector {
+    position: fixed; bottom: 140px; right: 10px;
+    display: flex; flex-direction: column; gap: 6px; z-index: 25;
+  }
+  .carBtn {
+    width: 82px; padding: 4px 0 3px;
+    background: rgba(0,0,0,0.75);
+    border: 3px solid #555; border-radius: 10px; cursor: pointer;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 2px;
+    transition: border-color 0.15s, transform 0.1s;
+    color: #ccc; font-family: Arial Black, sans-serif;
+    font-size: 9px; letter-spacing: 0.5px;
+  }
+  .carBtn:active { transform: scale(0.95); }
+  .carBtn.active { border-color: #ffea00; background: rgba(80,70,0,0.5); color: #ffea00; }
+  .carBtn canvas { display: block; }
+
+  #msg {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    color: #fff; font-size: 28px; font-family: Arial Black, sans-serif;
+    text-align: center; background: rgba(0,0,0,0.75);
+    padding: 20px 32px; border-radius: 16px; z-index: 30;
+    text-shadow: 2px 2px 4px #000;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui"><div id="stars"></div></div>
+<div id="cambox"><video id="vid" autoplay playsinline muted></video></div>
+
+<div id="soundBtn">🔊</div>
+
+<div id="carSelector">
+  <div class="carBtn active" data-car="0"><canvas id="thumb0" width="74" height="46"></canvas><span>MONSTER</span></div>
+  <div class="carBtn"        data-car="1"><canvas id="thumb1" width="74" height="46"></canvas><span>MATER</span></div>
+  <div class="carBtn"        data-car="2"><canvas id="thumb2" width="74" height="46"></canvas><span>McQUEEN</span></div>
+</div>
+
+<div id="msg">Wave your hand to steer!<br>Tap anywhere to HONK! 🔊</div>
+
+<script src="lib/hands.js" crossorigin="anonymous"></script>
+<script src="lib/camera_utils.js" crossorigin="anonymous"></script>
+<script>
+// ─── Canvas ─────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+// ─── Audio ──────────────────────────────────────────────────────────────────
+const AC = new (window.AudioContext || window.webkitAudioContext)();
+let soundMuted = false;
+
+function playEngine() {
+  if (soundMuted) return;
+  const osc = AC.createOscillator(), g = AC.createGain();
+  osc.type = 'sawtooth'; osc.frequency.value = 55 + Math.random() * 10;
+  g.gain.value = 0.08;
+  osc.connect(g); g.connect(AC.destination);
+  osc.start(); osc.stop(AC.currentTime + 0.12);
+}
+
+function playCrash() {
+  if (soundMuted) return;
+  const n = AC.sampleRate * 0.35, buf = AC.createBuffer(1, n, AC.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random()*2-1)*(1 - i/n);
+  const src = AC.createBufferSource(), g = AC.createGain();
+  src.buffer = buf; g.gain.value = 0.55;
+  src.connect(g); g.connect(AC.destination); src.start();
+}
+
+function playHonk() {
+  if (soundMuted) return;
+  const osc = AC.createOscillator(), g = AC.createGain();
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(420, AC.currentTime);
+  osc.frequency.setValueAtTime(380, AC.currentTime + 0.12);
+  g.gain.setValueAtTime(0.4, AC.currentTime);
+  g.gain.linearRampToValueAtTime(0, AC.currentTime + 0.3);
+  osc.connect(g); g.connect(AC.destination);
+  osc.start(); osc.stop(AC.currentTime + 0.3);
+}
+
+function playJumpSound() {
+  if (soundMuted) return;
+  const osc = AC.createOscillator(), g = AC.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(160, AC.currentTime);
+  osc.frequency.linearRampToValueAtTime(700, AC.currentTime + 0.4);
+  g.gain.setValueAtTime(0.28, AC.currentTime);
+  g.gain.linearRampToValueAtTime(0, AC.currentTime + 0.5);
+  osc.connect(g); g.connect(AC.destination);
+  osc.start(); osc.stop(AC.currentTime + 0.5);
+}
+
+function playLandSound() {
+  if (soundMuted) return;
+  const n = AC.sampleRate * 0.18, buf = AC.createBuffer(1, n, AC.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random()*2-1) * Math.exp(-i / (AC.sampleRate * 0.04));
+  const src = AC.createBufferSource(), g = AC.createGain();
+  src.buffer = buf; g.gain.value = 0.45;
+  src.connect(g); g.connect(AC.destination); src.start();
+}
+
+let engineInterval = null;
+function startEngine() {
+  if (engineInterval) return;
+  engineInterval = setInterval(playEngine, 130);
+}
+
+// ─── Sound toggle ────────────────────────────────────────────────────────────
+const soundBtn = document.getElementById('soundBtn');
+soundBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  AC.resume();
+  soundMuted = !soundMuted;
+  soundBtn.textContent = soundMuted ? '🔇' : '🔊';
+  if (soundMuted) { clearInterval(engineInterval); engineInterval = null; }
+  else if (handVisible) startEngine();
+});
+
+// ─── Car selection ───────────────────────────────────────────────────────────
+let selectedCar = 0;
+document.querySelectorAll('.carBtn').forEach(btn => {
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    selectedCar = +btn.dataset.car;
+    document.querySelectorAll('.carBtn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function roundRect(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x+r,y); c.lineTo(x+w-r,y); c.quadraticCurveTo(x+w,y,x+w,y+r);
+  c.lineTo(x+w,y+h-r); c.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  c.lineTo(x+r,y+h); c.quadraticCurveTo(x,y+h,x,y+h-r);
+  c.lineTo(x,y+r); c.quadraticCurveTo(x,y,x+r,y);
+  c.closePath();
+}
+
+function drawWheel(c, x, y, r, hub='#ffd600') {
+  c.save(); c.translate(x,y); c.rotate(Date.now()/120);
+  c.fillStyle='#1a1a1a'; c.beginPath(); c.arc(0,0,r,0,Math.PI*2); c.fill();
+  c.strokeStyle='#444'; c.lineWidth=3;
+  for(let i=0;i<6;i++){c.save();c.rotate(Math.PI*2/6*i);c.beginPath();c.moveTo(r-7,0);c.lineTo(r,0);c.stroke();c.restore();}
+  c.fillStyle=hub; c.beginPath(); c.arc(0,0,r*.38,0,Math.PI*2); c.fill();
+  c.fillStyle='#333'; c.beginPath(); c.arc(0,0,r*.18,0,Math.PI*2); c.fill();
+  c.restore();
+}
+
+// ─── Car drawing: Monster Truck ──────────────────────────────────────────────
+function drawMonsterTruck(c, x, y, shadow=true) {
+  const W=140, H=90;
+  c.save(); c.translate(x,y);
+  if(shadow){c.fillStyle='rgba(0,0,0,0.25)';c.beginPath();c.ellipse(0,H/2+8,W*.55,12,0,0,Math.PI*2);c.fill();}
+
+  const bg=c.createLinearGradient(-W/2,-H/3,W/2,H/3);
+  bg.addColorStop(0,'#e53935'); bg.addColorStop(.5,'#ff5252'); bg.addColorStop(1,'#b71c1c');
+  c.fillStyle=bg; roundRect(c,-W/2+10,-H/2+10,W-20,H*.55,10); c.fill();
+
+  c.fillStyle='#ffca28'; roundRect(c,-W/4,-H/2-2,W/2.2,H*.45,8); c.fill();
+  c.fillStyle='rgba(100,200,255,0.75)'; roundRect(c,-W/4+6,-H/2+4,W/2.2-12,H*.28,5); c.fill();
+
+  c.fillStyle='#888'; c.fillRect(W/2-20,-H/2+8,8,26); c.fillRect(W/2-10,-H/2+8,8,26);
+  c.fillStyle='rgba(200,200,200,0.4)';
+  c.beginPath(); c.arc(W/2-12,-H/2-6+Math.sin(Date.now()/200)*3,7,0,Math.PI*2); c.fill();
+
+  drawWheel(c,-W/2+10,H/2,26); drawWheel(c,W/2-10,H/2,26);
+  drawWheel(c,-W/2+10,-H/4+4,26); drawWheel(c,W/2-10,-H/4+4,26);
+  c.restore();
+}
+
+// ─── Car drawing: Mater ──────────────────────────────────────────────────────
+function drawMater(c, x, y, shadow=true) {
+  const W=150, H=80;
+  c.save(); c.translate(x,y);
+  if(shadow){c.fillStyle='rgba(0,0,0,0.25)';c.beginPath();c.ellipse(0,H/2+6,W*.5,10,0,0,Math.PI*2);c.fill();}
+
+  // Flatbed body
+  const bg=c.createLinearGradient(-W/2,-H/3,W/2,H/3);
+  bg.addColorStop(0,'#8B4513'); bg.addColorStop(.5,'#A0522D'); bg.addColorStop(1,'#6B3410');
+  c.fillStyle=bg; roundRect(c,-W/2,-H/4,W*.7,H*.5,6); c.fill();
+
+  // Rust spots
+  c.fillStyle='rgba(50,15,0,0.4)';
+  c.beginPath(); c.ellipse(-W*.3,-H/10,13,8,.3,0,Math.PI*2); c.fill();
+  c.beginPath(); c.ellipse(-W*.08,H/10,9,6,-.2,0,Math.PI*2); c.fill();
+
+  // Cab
+  c.fillStyle='#7B3810'; roundRect(c,W/2-W*.46,-H/2,W*.46,H*.72,14); c.fill();
+  c.fillStyle='#9B5030'; roundRect(c,W/2-W*.44,-H/2+2,W*.2,H*.34,8); c.fill();
+
+  // Window
+  c.fillStyle='rgba(140,220,255,0.7)'; roundRect(c,W/2-W*.42,-H/2+5,W*.38,H*.3,6); c.fill();
+
+  // Headlight
+  c.fillStyle='#fff9c4'; c.beginPath(); c.arc(W/2-4,-H*.22,7,0,Math.PI*2); c.fill();
+  c.fillStyle='#ffee58'; c.beginPath(); c.arc(W/2-4,-H*.22,4,0,Math.PI*2); c.fill();
+
+  // Tow crane arm
+  c.strokeStyle='#555'; c.lineWidth=7; c.lineCap='round';
+  c.beginPath(); c.moveTo(-W/2+10,-H/6); c.lineTo(-W/2-12,-H/2-12); c.stroke();
+  c.strokeStyle='#888'; c.lineWidth=3;
+  c.beginPath(); c.arc(-W/2-12,-H/2-12,9,Math.PI*.5,Math.PI*1.5); c.stroke();
+  // Hook chain link
+  c.strokeStyle='#aaa'; c.lineWidth=2;
+  c.beginPath(); c.moveTo(-W/2-12,-H/2-3); c.lineTo(-W/2-12,-H/2+10); c.stroke();
+
+  drawWheel(c,-W/2+20,H/2-4,18,'#b0bec5');
+  drawWheel(c,W/2-16,H/2-4,18,'#b0bec5');
+  drawWheel(c,W/2-44,H/2-4,18,'#b0bec5');
+  c.restore();
+}
+
+// ─── Car drawing: Lightning McQueen ─────────────────────────────────────────
+function drawMcQueen(c, x, y, shadow=true) {
+  const W=150, H=58;
+  c.save(); c.translate(x,y);
+  if(shadow){c.fillStyle='rgba(0,0,0,0.25)';c.beginPath();c.ellipse(0,H/2+4,W*.55,9,0,0,Math.PI*2);c.fill();}
+
+  // Sleek body
+  c.fillStyle='#e53935';
+  c.beginPath();
+  c.moveTo(-W/2+8, H/4);   c.lineTo(W/2-4, H/4);
+  c.lineTo(W/2+6, 0);      c.lineTo(W/2-18,-H/3);
+  c.lineTo(W/4,  -H/2+4);  c.lineTo(-W/4, -H/2+4);
+  c.lineTo(-W/2+8,-H/6);
+  c.closePath(); c.fill();
+
+  // Shine stripe
+  c.fillStyle='rgba(255,140,140,0.35)';
+  c.beginPath();
+  c.moveTo(W/2-18,-H/3); c.lineTo(W/4,-H/2+4);
+  c.lineTo(W/4-44,-H/2+4); c.lineTo(W/2-62,-H/3+5);
+  c.closePath(); c.fill();
+
+  // Lightning bolt
+  c.fillStyle='#ffea00'; c.strokeStyle='#ff6f00'; c.lineWidth=1.2;
+  c.beginPath();
+  c.moveTo(-W/8+8,-H*.32); c.lineTo(-W/8-5,0); c.lineTo(-W/8+5,0);
+  c.lineTo(-W/8-8,H*.3);   c.lineTo(-W/8+3,-H*.1); c.lineTo(-W/8-5,-H*.1);
+  c.closePath(); c.fill(); c.stroke();
+
+  // Number 95
+  c.fillStyle='#fff'; c.font=`bold ${H*.45}px Arial Black`;
+  c.textAlign='center'; c.textBaseline='middle';
+  c.fillText('95', W*.18, H*.08);
+
+  // Windshield
+  c.fillStyle='rgba(100,200,255,0.75)';
+  c.beginPath();
+  c.moveTo(W/2-20,-H/3+2); c.lineTo(W/4+2,-H/2+7);
+  c.lineTo(W/4-26,-H/2+7); c.lineTo(W/2-52,-H/3+7);
+  c.closePath(); c.fill();
+
+  // Spoiler
+  c.fillStyle='#b71c1c'; c.fillRect(-W/2+4,-H/2+2,6,H*.4);
+  c.fillStyle='#c62828'; c.fillRect(-W/2-1,-H/2,18,5);
+
+  // Racing wheels (wide)
+  drawWheel(c,-W/2+26,H/2-4,20,'#90a4ae');
+  drawWheel(c, W/2-24,H/2-4,20,'#90a4ae');
+  c.restore();
+}
+
+function drawCurrentCar(c, x, y, shadow=true) {
+  if (selectedCar===0) drawMonsterTruck(c,x,y,shadow);
+  else if (selectedCar===1) drawMater(c,x,y,shadow);
+  else drawMcQueen(c,x,y,shadow);
+}
+
+// Draw thumbnails once at startup
+function drawThumbnails() {
+  const fns = [drawMonsterTruck, drawMater, drawMcQueen];
+  fns.forEach((fn, i) => {
+    const tc = document.getElementById(`thumb${i}`);
+    const tctx = tc.getContext('2d');
+    tctx.clearRect(0,0,74,46);
+    tctx.save(); tctx.translate(37,26); tctx.scale(0.42,0.42);
+    fn(tctx,0,0,false);
+    tctx.restore();
+  });
+}
+
+// ─── Game state ─────────────────────────────────────────────────────────────
+let truckX, truckBaseY;
+let jumpOffsetY = 0, jumpVelY = 0, isJumping = false;
+let handX = 0.5, handVisible = false;
+let handScreenX = -999, handScreenY = -999;
+let stars = 0, bgOffset = 0;
+let particles = [], obstacles = [], dustPuffs = [], starPops = [];
+let flashAlpha = 0;
+const TRUCK_W = 140, TRUCK_H = 90;
+
+function initGame() {
+  truckX = canvas.width / 2;
+  truckBaseY = canvas.height - TRUCK_H/2 - 30;
+}
+
+// ─── Jump ────────────────────────────────────────────────────────────────────
+function triggerJump() {
+  if (isJumping) return;
+  isJumping = true;
+  jumpVelY = -18;
+  playJumpSound();
+}
+
+function updateJump() {
+  if (!isJumping) return;
+  jumpOffsetY += jumpVelY;
+  jumpVelY += 1.1;
+  if (jumpOffsetY >= 0 && jumpVelY > 0) {
+    jumpOffsetY = 0; jumpVelY = 0; isJumping = false;
+    spawnDust(truckX, truckBaseY + TRUCK_H/2);
+    playLandSound();
+  }
+}
+
+function spawnDust(x, y) {
+  for (let i=0;i<14;i++) {
+    const a = Math.PI + Math.random()*Math.PI, sp = 1+Math.random()*4;
+    dustPuffs.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-1.5,r:8+Math.random()*14,life:1});
+  }
+}
+
+function updateDust() {
+  for (let i=dustPuffs.length-1;i>=0;i--) {
+    const d=dustPuffs[i]; d.x+=d.vx; d.y+=d.vy; d.vy+=0.12; d.life-=0.04;
+    if(d.life<=0) dustPuffs.splice(i,1);
+  }
+}
+
+function drawDust() {
+  for(const d of dustPuffs){
+    ctx.globalAlpha=d.life*.55; ctx.fillStyle='#bcaaa4';
+    ctx.beginPath(); ctx.arc(d.x,d.y,d.r,0,Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha=1;
+}
+
+// ─── Background ──────────────────────────────────────────────────────────────
+function drawBackground() {
+  const W=canvas.width, H=canvas.height;
+  const sky=ctx.createLinearGradient(0,0,0,H*.55);
+  sky.addColorStop(0,'#1a1a2e'); sky.addColorStop(1,'#16213e');
+  ctx.fillStyle=sky; ctx.fillRect(0,0,W,H);
+
+  const grd=ctx.createLinearGradient(0,H*.55,0,H);
+  grd.addColorStop(0,'#5d4037'); grd.addColorStop(1,'#3e2723');
+  ctx.fillStyle=grd; ctx.fillRect(0,H*.55,W,H);
+
+  // Road stripes
+  ctx.strokeStyle='#f9a825'; ctx.lineWidth=10;
+  ctx.setLineDash([60,40]); ctx.lineDashOffset=-(bgOffset%100);
+  ctx.beginPath(); ctx.moveTo(W/2,H*.55); ctx.lineTo(W/2,H); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Hills
+  ctx.fillStyle='#2e7d32'; ctx.beginPath(); ctx.moveTo(0,H*.55);
+  for(let x=0;x<=W+100;x+=100){
+    ctx.lineTo(x, H*.55-40*Math.sin((x+bgOffset*.3)/150));
+  }
+  ctx.lineTo(W,H*.55); ctx.lineTo(0,H*.55); ctx.fill();
+}
+
+// ─── Ramp drawing ────────────────────────────────────────────────────────────
+function drawRamp(obs) {
+  ctx.save(); ctx.translate(obs.x, obs.y);
+  const w=72, h=50;
+  const rg=ctx.createLinearGradient(-w/2,-h/2,w/2,h/2);
+  rg.addColorStop(0,'#90a4ae'); rg.addColorStop(1,'#546e7a');
+  ctx.fillStyle=rg;
+  ctx.beginPath();
+  ctx.moveTo(-w/2,h/2); ctx.lineTo(w/2,h/2); ctx.lineTo(w/2,-h/2);
+  ctx.closePath(); ctx.fill();
+  // Edge highlight
+  ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.moveTo(-w/2,h/2); ctx.lineTo(w/2,-h/2);
+  ctx.stroke();
+  // Label
+  ctx.fillStyle='#ffea00'; ctx.font='bold 14px Arial Black';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('JUMP!', w/5, h*.1);
+  // Arrow above
+  ctx.font='22px serif'; ctx.fillText('⬆', 0, -h/2-18);
+  ctx.restore();
+}
+
+// ─── Obstacle drawing ────────────────────────────────────────────────────────
+function drawObstacle(obs) {
+  ctx.save(); ctx.translate(obs.x, obs.y);
+  ctx.fillStyle='rgba(0,0,0,0.2)';
+  ctx.beginPath(); ctx.ellipse(0,obs.h/2,obs.w*.4,8,0,0,Math.PI*2); ctx.fill();
+  ctx.font=`${obs.w}px serif`; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(obs.emoji,0,0);
+  ctx.restore();
+}
+
+// ─── Particles ───────────────────────────────────────────────────────────────
+const COLORS=['#ff1744','#ffea00','#00e676','#40c4ff','#ff6d00','#ea80fc','#fff'];
+
+function spawnExplosion(x, y) {
+  for(let i=0;i<30;i++){
+    const a=Math.random()*Math.PI*2, sp=3+Math.random()*10;
+    particles.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-4,r:5+Math.random()*13,color:COLORS[0|Math.random()*COLORS.length],life:1});
+  }
+  flashAlpha=0.7;
+}
+
+function updateParticles(){
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i]; p.x+=p.vx; p.y+=p.vy; p.vy+=0.4; p.life-=0.025;
+    if(p.life<=0) particles.splice(i,1);
+  }
+}
+
+function drawParticles(){
+  for(const p of particles){ ctx.globalAlpha=p.life; ctx.fillStyle=p.color; ctx.beginPath(); ctx.arc(p.x,p.y,p.r*p.life,0,Math.PI*2); ctx.fill(); }
+  ctx.globalAlpha=1;
+}
+
+// ─── Star pops ───────────────────────────────────────────────────────────────
+function spawnStarPop(x,y){ starPops.push({x,y,life:1,vy:-3}); }
+
+function drawStarPops(){
+  for(let i=starPops.length-1;i>=0;i--){
+    const s=starPops[i]; ctx.globalAlpha=s.life;
+    ctx.font='52px serif'; ctx.textAlign='center'; ctx.fillText('⭐',s.x,s.y);
+    s.y+=s.vy; s.life-=0.025;
+    if(s.life<=0) starPops.splice(i,1);
+  }
+  ctx.globalAlpha=1;
+}
+
+// ─── Hand cursor ─────────────────────────────────────────────────────────────
+function drawHandCursor(){
+  if(!handVisible) return;
+  ctx.save();
+  ctx.globalAlpha=0.5; ctx.strokeStyle='#ffea00'; ctx.lineWidth=3;
+  ctx.beginPath(); ctx.arc(handScreenX,handScreenY,28,0,Math.PI*2); ctx.stroke();
+  ctx.globalAlpha=0.18; ctx.fillStyle='#ffea00'; ctx.fill();
+  ctx.restore();
+}
+
+// ─── Obstacles spawning ──────────────────────────────────────────────────────
+const OBS_EMOJIS=['🛢️','🚗','🔺','🪨','🌵','📦'];
+let nextSpawn=0, nextRamp=3000;
+
+function spawnObstacle(){
+  const margin=80, x=margin+Math.random()*(canvas.width-margin*2);
+  obstacles.push({type:'crush',x,y:-60,w:56,h:56,emoji:OBS_EMOJIS[0|Math.random()*OBS_EMOJIS.length],speed:3+Math.random()*3});
+}
+
+function spawnRamp(){
+  const margin=100, x=margin+Math.random()*(canvas.width-margin*2);
+  obstacles.push({type:'ramp',x,y:-80,w:72,h:50,speed:3.5});
+}
+
+// ─── Collision ───────────────────────────────────────────────────────────────
+function checkCollisions(){
+  const tx=truckX, ty=truckBaseY+jumpOffsetY;
+  const tw=TRUCK_W*.75, th=TRUCK_H*.6;
+
+  for(let i=obstacles.length-1;i>=0;i--){
+    const o=obstacles[i];
+    const ox=Math.abs(o.x-tx)<(tw/2+o.w/2);
+
+    if(o.type==='ramp'){
+      // Trigger when ramp reaches ground-level truck position (not during air)
+      if(ox && !isJumping && Math.abs(o.y-truckBaseY)<(th/2+o.h/2)){
+        obstacles.splice(i,1);
+        triggerJump();
+      }
+    } else {
+      if(ox && Math.abs(o.y-ty)<(th/2+o.h/2)){
+        obstacles.splice(i,1);
+        spawnExplosion(o.x,o.y);
+        spawnStarPop(o.x,o.y-60);
+        playCrash();
+        stars++;
+        updateStarsUI();
+      }
+    }
+  }
+}
+
+function updateStarsUI(){
+  document.getElementById('stars').textContent='⭐'.repeat(Math.min(stars,20));
+}
+
+// ─── Main loop ───────────────────────────────────────────────────────────────
+let lastTime=0;
+function loop(ts){
+  const dt=ts-lastTime; lastTime=ts;
+  const W=canvas.width, H=canvas.height;
+
+  truckBaseY = H - TRUCK_H/2 - 30;
+  const targetX = handVisible ? handX*W : truckX;
+  truckX += (targetX-truckX)*0.1;
+  truckX = Math.max(TRUCK_W/2, Math.min(W-TRUCK_W/2, truckX));
+
+  updateJump();
+  bgOffset += handVisible ? 4 : 1;
+
+  nextSpawn-=dt;
+  if(nextSpawn<=0){ spawnObstacle(); nextSpawn=1200+Math.random()*800; }
+  nextRamp-=dt;
+  if(nextRamp<=0){ spawnRamp(); nextRamp=4500+Math.random()*3000; }
+
+  for(let i=obstacles.length-1;i>=0;i--){
+    obstacles[i].y+=obstacles[i].speed;
+    if(obstacles[i].y>H+110) obstacles.splice(i,1);
+  }
+
+  checkCollisions();
+  updateParticles();
+  updateDust();
+
+  drawBackground();
+
+  // Draw ramps first (behind everything)
+  for(const o of obstacles) if(o.type==='ramp') drawRamp(o);
+  // Draw crush obstacles
+  for(const o of obstacles) if(o.type==='crush') drawObstacle(o);
+
+  // Truck draw position
+  const drawY = truckBaseY + jumpOffsetY;
+
+  // Ground shadow while airborne
+  if(isJumping){
+    const hr = Math.max(0, 1-Math.abs(jumpOffsetY)/130);
+    ctx.fillStyle=`rgba(0,0,0,${0.22*hr})`;
+    ctx.beginPath(); ctx.ellipse(truckX,truckBaseY+TRUCK_H/2,TRUCK_W*.4*hr,10*hr,0,0,Math.PI*2); ctx.fill();
+  }
+
+  drawCurrentCar(ctx, truckX, drawY, !isJumping);
+  drawParticles();
+  drawDust();
+  drawStarPops();
+  drawHandCursor();
+
+  if(flashAlpha>0){
+    ctx.fillStyle=`rgba(255,255,255,${flashAlpha})`;
+    ctx.fillRect(0,0,W,H);
+    flashAlpha=Math.max(0,flashAlpha-0.06);
+  }
+
+  requestAnimationFrame(loop);
+}
+
+// ─── MediaPipe Hands ─────────────────────────────────────────────────────────
+const video = document.getElementById('vid');
+const msgEl = document.getElementById('msg');
+
+const hands = new Hands({ locateFile: f=>`lib/${f}` });
+hands.setOptions({ maxNumHands:1, modelComplexity:0, minDetectionConfidence:0.6, minTrackingConfidence:0.5 });
+
+hands.onResults(results => {
+  if(results.multiHandLandmarks && results.multiHandLandmarks.length>0){
+    const lm=results.multiHandLandmarks[0];
+    handX=1-lm[0].x;
+    handScreenX=handX*canvas.width;
+    handScreenY=lm[0].y*canvas.height;
+    handVisible=true;
+    if(msgEl.style.display!=='none'){ msgEl.style.display='none'; startEngine(); }
+  } else {
+    handVisible=false;
+  }
+});
+
+const camera = new Camera(video, {
+  onFrame: async()=>{ await hands.send({image:video}); },
+  width:320, height:240
+});
+camera.start().catch(err=>{ msgEl.innerHTML='📷 Camera error:<br>'+err.message; });
+
+// ─── Honk on tap ─────────────────────────────────────────────────────────────
+document.addEventListener('click', ()=>{ AC.resume(); playHonk(); });
+document.addEventListener('touchstart', e=>{ e.preventDefault(); AC.resume(); playHonk(); },{passive:false});
+
+// ─── Start ───────────────────────────────────────────────────────────────────
+initGame();
+updateStarsUI();
+drawThumbnails();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
