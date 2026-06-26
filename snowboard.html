@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Biggie's Big Bear Snowboard</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0a1628; display:flex; align-items:center; justify-content:center; height:100vh; overflow:hidden; font-family:Arial,sans-serif; }
+#game { display:block; border-radius:10px; box-shadow:0 0 40px rgba(80,160,255,0.35); }
+#cambox { position:fixed; bottom:10px; right:10px; width:140px; height:105px; border:2px solid #4a90d9; border-radius:8px; overflow:hidden; opacity:0.8; }
+#cambox video { width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+#camtip { position:fixed; bottom:120px; right:10px; width:140px; text-align:center; background:rgba(0,0,0,0.7); color:#fff; font-size:11px; padding:4px 6px; border-radius:5px; }
+</style>
+</head>
+<body>
+<canvas id="game" width="800" height="450"></canvas>
+<div id="cambox"><video id="vid" autoplay muted playsinline></video></div>
+<div id="camtip">📷 loading...</div>
+
+<script src="lib/hands.js" crossorigin="anonymous"></script>
+<script src="lib/camera_utils.js" crossorigin="anonymous"></script>
+<script>
+'use strict';
+
+const C = document.getElementById('game');
+const X = C.getContext('2d');
+const W = 800, H = 450;
+const GY = 340;   // ground surface Y
+const RAIL_Y = GY - 65;  // rail top surface Y (65px above ground)
+const BW = 48, BH = 58;  // Biggie width/height
+
+// ── Audio ────────────────────────────────────────────────────
+let AC = null;
+function initAC() { if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)(); }
+function osc(freq, type, dur, vol = 0.28, freqEnd = null) {
+  if (!AC) return;
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(freq, AC.currentTime);
+  if (freqEnd) o.frequency.linearRampToValueAtTime(freqEnd, AC.currentTime + dur);
+  g.gain.setValueAtTime(vol, AC.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, AC.currentTime + dur);
+  o.connect(g); g.connect(AC.destination);
+  o.start(); o.stop(AC.currentTime + dur);
+}
+const SND = {
+  jump:  () => { osc(330,'sine',0.18,0.3); osc(520,'sine',0.1,0.18); },
+  land:  () => osc(110,'triangle',0.14,0.3),
+  hit:   () => { osc(90,'sawtooth',0.3,0.45); osc(65,'sawtooth',0.2,0.3); },
+  grind: () => osc(200,'sawtooth',0.07,0.1),
+  score: () => { osc(660,'sine',0.08,0.2); osc(880,'sine',0.1,0.25); },
+  trick: () => { osc(440,'sine',0.08,0.2); osc(550,'sine',0.08,0.22); osc(880,'sine',0.14,0.3); },
+};
+
+// ── State ────────────────────────────────────────────────────
+let phase = 'title'; // title | playing | dead
+let score = 0, hiScore = 0, dist = 0, spd = 4, lives = 3;
+let grindFrames = 0;
+
+// ── Biggie ───────────────────────────────────────────────────
+const B = { x:140, y:GY-BH, vy:0, onGround:true, onRail:false, inv:0 };
+
+// ── World objects ────────────────────────────────────────────
+let obs = [], parts = [], floats = [];
+let flakes = Array.from({length:55}, () => ({
+  x: Math.random()*W, y: Math.random()*H, r: Math.random()*2+0.8, s: Math.random()*1.2+0.4
+}));
+let spawnClock = 0, spawnGap = 95;
+
+// ── Input ────────────────────────────────────────────────────
+const keys = {};
+let jumpCD = 0;
+window.addEventListener('keydown', e => {
+  if (keys[e.code]) return;
+  keys[e.code] = true;
+  if (phase !== 'playing') { initAC(); startGame(); return; }
+  if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); doJump(); }
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ── Helpers ──────────────────────────────────────────────────
+function hits(ax,ay,aw,ah, bx,by,bw,bh) {
+  return ax < bx+bw && ax+aw > bx && ay < by+bh && ay+ah > by;
+}
+function burst(x, y, color, n=8) {
+  for (let i=0; i<n; i++) parts.push({
+    x, y, vx:(Math.random()-.5)*5, vy:-Math.random()*5-1, life:1, color
+  });
+}
+function addFloat(x, y, txt, color='#FFD700') {
+  floats.push({ x, y, txt, color, life:1 });
+}
+
+// ── Game control ─────────────────────────────────────────────
+function startGame() {
+  score=0; dist=0; spd=4; lives=3; grindFrames=0;
+  B.y=GY-BH; B.vy=0; B.onGround=true; B.onRail=false; B.inv=0;
+  obs=[]; parts=[]; floats=[]; spawnClock=0; spawnGap=95;
+  phase='playing';
+}
+
+function doJump() {
+  if (jumpCD > 0) return;
+  if (B.onGround || B.onRail) {
+    B.vy = -15; B.onGround=false; B.onRail=false;
+    jumpCD = 20; SND.jump();
+    burst(B.x+BW/2, B.y+BH, '#ddeeff', 10);
+  }
+}
+
+// ── Spawn ────────────────────────────────────────────────────
+function spawn() {
+  const r = Math.random();
+  if (r < 0.38) {
+    const sz = 28 + Math.random()*18;
+    obs.push({ type:'rock', x:W+40, y:GY-sz*0.7, w:sz, h:sz*0.8 });
+  } else if (r < 0.68) {
+    obs.push({ type:'ramp', x:W+40, y:GY, w:75, h:45, launched:false });
+  } else {
+    const len = 90 + Math.random()*70;
+    obs.push({ type:'rail', x:W+40, y:RAIL_Y, w:len, h:10, grindActive:false });
+  }
+}
+
+// ── Update ───────────────────────────────────────────────────
+function update() {
+  dist += spd;
+  spd = Math.min(11, 4 + dist/3500);
+  score = Math.floor(dist / 8);
+
+  if (jumpCD > 0) jumpCD--;
+  if (B.inv  > 0) B.inv--;
+
+  if (keys['ArrowRight']) spd = Math.min(11, spd+0.06);
+  if (keys['ArrowLeft'])  spd = Math.max(2.5, spd-0.06);
+
+  const wasOnGround = B.onGround;
+  B.onGround = false;
+  B.onRail   = false;
+
+  B.vy += 0.75;
+  B.y  += B.vy;
+
+  // ── Obstacle loop ──
+  for (let i = obs.length-1; i >= 0; i--) {
+    const o = obs[i];
+    o.x -= spd;
+
+    if (o.type === 'ramp' && !o.launched) {
+      const onX       = B.x+BW > o.x+8 && B.x < o.x+o.w;
+      const nearGround = B.y+BH >= GY-10;
+      if (onX && nearGround && B.vy >= 0) {
+        o.launched = true;
+        B.vy = -14;
+        SND.trick();
+        burst(B.x+BW/2, B.y+BH, '#aaddff', 10);
+        addFloat(B.x+BW/2, B.y-24, 'AIR +15', '#7adeff');
+        score += 15;
+      }
+    }
+
+    if (o.type === 'rail') {
+      const onX  = B.x+BW > o.x+4 && B.x < o.x+o.w-4;
+      const feet = B.y+BH;
+      if (onX && feet >= o.y-4 && feet <= o.y+18 && B.vy >= 0) {
+        B.y      = o.y - BH;
+        B.onRail = true;
+        if (!o.grindActive) {
+          o.grindActive = true;
+          addFloat(B.x+BW/2, B.y-24, 'GRIND!', '#FFD700');
+          SND.trick();
+        }
+      } else if (o.grindActive && !onX) {
+        o.grindActive = false;
+      }
+    }
+
+    if (o.type === 'rock' && B.inv === 0) {
+      if (hits(B.x+8,B.y+8,BW-16,BH-12, o.x+4,o.y+4,o.w-8,o.h-8)) {
+        lives--;
+        B.inv=100; B.vy=-9; B.onGround=false;
+        SND.hit();
+        burst(B.x+BW/2, B.y+BH/2, '#ff4455', 14);
+        addFloat(B.x+BW/2, B.y-14, 'OUCH!', '#ff4455');
+        if (lives <= 0) { hiScore=Math.max(hiScore,score); phase='dead'; }
+      }
+    }
+
+    if (o.x+o.w < -20) obs.splice(i, 1);
+  }
+
+  // Prevent gravity buildup while grinding
+  if (B.onRail) {
+    B.vy = 0;
+    grindFrames++;
+    if (grindFrames % 12 === 0) { score += 2; SND.grind(); }
+  } else {
+    grindFrames = 0;
+  }
+
+  // Ground clamp
+  if (B.y+BH >= GY && B.vy >= 0) {
+    if (!wasOnGround && B.vy > 3) {
+      SND.land();
+      burst(B.x+BW/2, GY, '#cceeff', 6);
+      if (B.vy < 9) { score+=5; SND.score(); addFloat(B.x+BW/2, B.y-30, 'CLEAN! +5','#7af'); }
+    }
+    B.y=GY-BH; B.vy=0; B.onGround=true;
+  }
+
+  // Spawn
+  spawnClock++;
+  if (spawnClock >= spawnGap) {
+    spawn(); spawnClock=0;
+    spawnGap = Math.max(48, 95 - dist/250);
+  }
+
+  // Snowflakes
+  flakes.forEach(f => {
+    f.x -= f.s*0.6; f.y += f.s;
+    if (f.y > H) { f.y=0; f.x=Math.random()*W; }
+    if (f.x < 0)  f.x = W;
+  });
+
+  // Particles
+  for (let i=parts.length-1; i>=0; i--) {
+    const p=parts[i]; p.x+=p.vx; p.y+=p.vy; p.vy+=0.25; p.life-=0.028;
+    if (p.life<=0) parts.splice(i,1);
+  }
+  for (let i=floats.length-1; i>=0; i--) {
+    floats[i].y-=0.8; floats[i].life-=0.018;
+    if (floats[i].life<=0) floats.splice(i,1);
+  }
+}
+
+// ── Drawing ──────────────────────────────────────────────────
+function drawBg() {
+  // Sky gradient
+  const sky = X.createLinearGradient(0,0,0,GY);
+  sky.addColorStop(0,'#5aa0cc'); sky.addColorStop(0.6,'#aad4f0'); sky.addColorStop(1,'#dff0ff');
+  X.fillStyle=sky; X.fillRect(0,0,W,GY);
+
+  // Background mountains
+  [
+    [130,220,190,'#9abdd4'], [310,195,225,'#a8ccdf'],
+    [530,228,175,'#93b6ce'], [730,205,195,'#a0c3da']
+  ].forEach(([cx,py,mw,col]) => {
+    X.fillStyle=col;
+    X.beginPath(); X.moveTo(cx-mw/2,GY); X.lineTo(cx,py); X.lineTo(cx+mw/2,GY); X.closePath(); X.fill();
+    // Snow cap
+    X.fillStyle='#ffffff';
+    X.beginPath(); X.moveTo(cx-mw*0.15,py+mw*0.15); X.lineTo(cx,py); X.lineTo(cx+mw*0.15,py+mw*0.15); X.closePath(); X.fill();
+  });
+
+  // Big Bear Lake (midground)
+  X.fillStyle='rgba(90,160,210,0.35)';
+  X.beginPath(); X.ellipse(400, GY-22, 280, 18, 0, 0, Math.PI*2); X.fill();
+
+  // Pine trees (parallax 30% of scroll speed)
+  X.fillStyle='#2a5e2a';
+  const treeOff = (dist*0.3) % 110;
+  for (let tx=-treeOff; tx<W+60; tx+=110) {
+    drawTree(tx+28, GY); drawTree(tx+66, GY-9); drawTree(tx+93, GY+4);
+  }
+
+  // Snow ground
+  const sg = X.createLinearGradient(0,GY,0,H);
+  sg.addColorStop(0,'#eef6ff'); sg.addColorStop(0.06,'#d8eaf8'); sg.addColorStop(1,'#b0c6da');
+  X.fillStyle=sg; X.fillRect(0,GY,W,H-GY);
+  // Surface highlight
+  X.fillStyle='#ffffff'; X.fillRect(0,GY,W,5);
+
+  // Snowflakes
+  X.fillStyle='rgba(255,255,255,0.85)';
+  flakes.forEach(f => { X.beginPath(); X.arc(f.x,f.y,f.r,0,Math.PI*2); X.fill(); });
+}
+
+function drawTree(x, y) {
+  X.beginPath(); X.moveTo(x,y-44); X.lineTo(x-13,y); X.lineTo(x+13,y); X.closePath(); X.fill();
+  X.beginPath(); X.moveTo(x,y-30); X.lineTo(x-10,y-10); X.lineTo(x+10,y-10); X.closePath(); X.fill();
+  X.fillStyle='#5d4037'; X.fillRect(x-3,y,6,8); X.fillStyle='#2a5e2a';
+}
+
+function drawObs() {
+  obs.forEach(o => {
+    if (o.type === 'rock') {
+      // Shadow
+      X.fillStyle='rgba(0,0,0,0.1)';
+      X.beginPath(); X.ellipse(o.x+o.w/2,GY+2,o.w/2,5,0,0,Math.PI*2); X.fill();
+      // Body
+      X.fillStyle='#7a8fa0';
+      X.beginPath(); X.ellipse(o.x+o.w/2,o.y+o.h/2,o.w/2,o.h/2,-0.2,0,Math.PI*2); X.fill();
+      X.fillStyle='#8fa4b8';
+      X.beginPath(); X.ellipse(o.x+o.w/2-3,o.y+o.h/2-4,o.w/3,o.h/3,-0.3,0,Math.PI*2); X.fill();
+      // Snow on top
+      X.fillStyle='#ffffff';
+      X.beginPath(); X.ellipse(o.x+o.w/2,o.y+3,o.w*0.36,o.h*0.27,0,0,Math.PI*2); X.fill();
+    }
+
+    if (o.type === 'ramp') {
+      X.fillStyle='#80a8c8';
+      X.beginPath(); X.moveTo(o.x,o.y); X.lineTo(o.x+o.w,o.y-o.h); X.lineTo(o.x+o.w,o.y); X.closePath(); X.fill();
+      // Snow on ramp face
+      X.fillStyle='rgba(255,255,255,0.5)';
+      X.beginPath(); X.moveTo(o.x+4,o.y-1); X.lineTo(o.x+o.w,o.y-o.h); X.lineTo(o.x+o.w,o.y-o.h+7); X.lineTo(o.x+5,o.y+5); X.closePath(); X.fill();
+    }
+
+    if (o.type === 'rail') {
+      // Support posts
+      X.fillStyle='#888';
+      X.fillRect(o.x+8, o.y+o.h, 5, GY-o.y-o.h);
+      X.fillRect(o.x+o.w-13, o.y+o.h, 5, GY-o.y-o.h);
+      // Rail bar
+      X.fillStyle = o.grindActive ? '#FFD700' : '#aab8c2';
+      X.fillRect(o.x, o.y, o.w, o.h);
+      // Highlight
+      X.fillStyle = o.grindActive ? '#ffe566' : '#d0dce6';
+      X.fillRect(o.x, o.y, o.w, 3);
+    }
+  });
+}
+
+function drawBiggie() {
+  // Flicker when invincible
+  if (B.inv > 0 && Math.floor(B.inv/5)%2===0) return;
+
+  const x=B.x, y=B.y;
+  X.save();
+  // Lean forward slightly
+  X.translate(x+BW/2, y+BH/2); X.rotate(0.1); X.translate(-(x+BW/2), -(y+BH/2));
+
+  // Board shadow on ground
+  X.fillStyle='rgba(0,0,0,0.13)';
+  X.beginPath(); X.ellipse(x+BW/2, GY+3, BW/2+9, 5, 0, 0, Math.PI*2); X.fill();
+
+  // Snowboard
+  X.fillStyle='#0044cc';
+  X.beginPath();
+  X.moveTo(x-10, y+BH-1); X.lineTo(x-6, y+BH+8); X.lineTo(x+BW+6, y+BH+8); X.lineTo(x+BW+10, y+BH-1);
+  X.closePath(); X.fill();
+  // Board stripe
+  X.fillStyle='#ff6600'; X.fillRect(x-4, y+BH-1, BW+10, 3);
+
+  // Body / jacket
+  X.fillStyle='#cc2200';
+  X.beginPath(); X.ellipse(x+BW/2, y+BH*0.62, BW*0.38, BH*0.3, 0, 0, Math.PI*2); X.fill();
+
+  // Head
+  X.fillStyle='#a07840';
+  X.beginPath(); X.arc(x+BW/2, y+BH*0.3, BW*0.33, 0, Math.PI*2); X.fill();
+
+  // Ears
+  X.fillStyle='#8b6414';
+  X.beginPath(); X.arc(x+BW/2-13, y+BH*0.13, 9, 0, Math.PI*2); X.fill();
+  X.beginPath(); X.arc(x+BW/2+13, y+BH*0.13, 9, 0, Math.PI*2); X.fill();
+  X.fillStyle='#c08040';
+  X.beginPath(); X.arc(x+BW/2-13, y+BH*0.13, 5, 0, Math.PI*2); X.fill();
+  X.beginPath(); X.arc(x+BW/2+13, y+BH*0.13, 5, 0, Math.PI*2); X.fill();
+
+  // Goggle strap
+  X.strokeStyle='#222'; X.lineWidth=4;
+  X.beginPath(); X.arc(x+BW/2, y+BH*0.26, 14, Math.PI*0.68, Math.PI*2.32); X.stroke();
+
+  // Goggle lenses
+  X.fillStyle='#ff6600';
+  X.beginPath(); X.ellipse(x+BW/2-6, y+BH*0.26, 5, 4, 0, 0, Math.PI*2); X.fill();
+  X.beginPath(); X.ellipse(x+BW/2+6, y+BH*0.26, 5, 4, 0, 0, Math.PI*2); X.fill();
+  X.fillStyle='rgba(255,220,0,0.35)';
+  X.beginPath(); X.ellipse(x+BW/2-6, y+BH*0.26, 5, 4, 0, 0, Math.PI*2); X.fill();
+  X.beginPath(); X.ellipse(x+BW/2+6, y+BH*0.26, 5, 4, 0, 0, Math.PI*2); X.fill();
+
+  // Eyes (behind goggles)
+  X.fillStyle='#111';
+  X.beginPath(); X.arc(x+BW/2-6, y+BH*0.26, 2.5, 0, Math.PI*2); X.fill();
+  X.beginPath(); X.arc(x+BW/2+6, y+BH*0.26, 2.5, 0, Math.PI*2); X.fill();
+  X.fillStyle='#fff';
+  X.beginPath(); X.arc(x+BW/2-5, y+BH*0.25, 1, 0, Math.PI*2); X.fill();
+  X.beginPath(); X.arc(x+BW/2+7, y+BH*0.25, 1, 0, Math.PI*2); X.fill();
+
+  // Nose
+  X.fillStyle='#333'; X.beginPath(); X.ellipse(x+BW/2, y+BH*0.36, 4.5, 3, 0, 0, Math.PI*2); X.fill();
+
+  // Arms
+  X.fillStyle='#aa1800';
+  X.beginPath(); X.ellipse(x+BW/2-20, y+BH*0.6, 7, 13, -0.5, 0, Math.PI*2); X.fill();
+  X.beginPath(); X.ellipse(x+BW/2+20, y+BH*0.6, 7, 13, 0.5, 0, Math.PI*2); X.fill();
+
+  // Grind sparks
+  if (B.onRail) {
+    for (let i=0; i<4; i++) {
+      X.fillStyle=`hsl(${40+Math.random()*40},100%,65%)`;
+      X.beginPath(); X.arc(x+5+Math.random()*(BW-10), y+BH+4, 1.5, 0, Math.PI*2); X.fill();
+    }
+  }
+
+  X.restore();
+}
+
+function drawParts() {
+  parts.forEach(p => { X.globalAlpha=p.life; X.fillStyle=p.color; X.beginPath(); X.arc(p.x,p.y,3,0,Math.PI*2); X.fill(); });
+  X.textAlign='center';
+  floats.forEach(f => {
+    X.globalAlpha=f.life; X.fillStyle=f.color;
+    X.font='bold 15px Arial'; X.fillText(f.txt,f.x,f.y);
+  });
+  X.globalAlpha=1; X.textAlign='left';
+}
+
+function drawHUD() {
+  // Score panel
+  X.fillStyle='rgba(0,16,50,0.75)'; X.fillRect(10,10,195,72);
+  X.fillStyle='#FFD700'; X.font='bold 11px Arial'; X.fillText('BIG BEAR MTN SNOWBOARD', 18,28);
+  X.fillStyle='#ffffff'; X.font='bold 26px Arial'; X.fillText(`${score}`, 18,57);
+  X.fillStyle='#9ab'; X.font='13px Arial'; X.fillText(`Best: ${hiScore}`, 92,57);
+
+  // Lives (hearts)
+  for (let i=0; i<3; i++) {
+    X.fillStyle = i < lives ? '#ff4444' : '#444';
+    X.font='20px Arial'; X.fillText('♥', 16+i*26, 88);
+  }
+
+  // Speed display
+  X.fillStyle='rgba(0,16,50,0.75)'; X.fillRect(W-115,10,105,36);
+  X.fillStyle='#7ad4ff'; X.font='13px Arial'; X.fillText(`⚡ ${spd.toFixed(1)}x`, W-104,32);
+}
+
+function drawTitle() {
+  X.fillStyle='rgba(0,0,0,0.64)'; X.fillRect(0,0,W,H);
+  X.textAlign='center';
+  X.fillStyle='#FFD700'; X.font='bold 46px Arial'; X.fillText("BIGGIE'S SNOWBOARD", W/2, H/2-74);
+  X.fillStyle='#cce8ff'; X.font='20px Arial'; X.fillText('Big Bear Mountain Resort', W/2, H/2-34);
+  X.fillStyle='#aaddff'; X.font='15px Arial';
+  X.fillText('Jump ramps  •  Grind rails  •  Dodge rocks', W/2, H/2+10);
+  X.fillText('SPACE / Raise hand = Jump    ◄ ► = Adjust speed', W/2, H/2+36);
+  X.fillStyle='#FFD700'; X.font='bold 22px Arial'; X.fillText('Press SPACE to start!', W/2, H/2+84);
+  X.textAlign='left';
+}
+
+function drawDead() {
+  X.fillStyle='rgba(0,0,0,0.7)'; X.fillRect(0,0,W,H);
+  X.textAlign='center';
+  X.fillStyle='#ff4455'; X.font='bold 50px Arial'; X.fillText('WIPEOUT!', W/2, H/2-58);
+  X.fillStyle='#FFD700'; X.font='bold 28px Arial'; X.fillText(`Score: ${score}`, W/2, H/2-4);
+  X.fillStyle='#aaa'; X.font='18px Arial'; X.fillText(`Best: ${hiScore}`, W/2, H/2+32);
+  X.fillStyle='#fff'; X.font='20px Arial'; X.fillText('Press SPACE to ride again!', W/2, H/2+76);
+  X.textAlign='left';
+}
+
+// ── Main loop ────────────────────────────────────────────────
+function loop() {
+  if (phase === 'playing') update();
+  X.clearRect(0,0,W,H);
+  drawBg();
+  drawObs();
+  drawParts();
+  drawBiggie();
+  if (phase === 'playing') drawHUD();
+  if (phase === 'title')   { drawHUD(); drawTitle(); }
+  if (phase === 'dead')    { drawHUD(); drawDead(); }
+  requestAnimationFrame(loop);
+}
+loop();
+
+// ── MediaPipe hand gesture control ───────────────────────────
+const tipEl = document.getElementById('camtip');
+let lastHY = null, handJumpCD = 0;
+
+(async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video:{ width:320, height:240 } });
+    document.getElementById('vid').srcObject = stream;
+    tipEl.textContent = '✋ Flick hand up to jump!';
+
+    const mpHands = new Hands({ locateFile: f => `lib/${f}` });
+    mpHands.setOptions({ maxNumHands:1, modelComplexity:0, minDetectionConfidence:0.7, minTrackingConfidence:0.5 });
+
+    mpHands.onResults(res => {
+      if (!res.multiHandLandmarks?.length) {
+        lastHY = null;
+        tipEl.textContent = '✋ No hand detected';
+        return;
+      }
+      const wy = res.multiHandLandmarks[0][0].y; // wrist Y (0=top, 1=bottom)
+      if (lastHY !== null) {
+        const dy = lastHY - wy; // positive = hand moved upward
+        if (dy > 0.07 && handJumpCD <= 0) {
+          initAC();
+          if (phase !== 'playing') startGame();
+          else doJump();
+          handJumpCD = 25;
+          tipEl.textContent = '🚀 JUMP!';
+        } else {
+          tipEl.textContent = `✋ y=${wy.toFixed(2)}`;
+        }
+      }
+      lastHY = wy;
+      if (handJumpCD > 0) handJumpCD--;
+    });
+
+    const cam = new Camera(document.getElementById('vid'), {
+      onFrame: async () => await mpHands.send({ image: document.getElementById('vid') }),
+      width:320, height:240
+    });
+    cam.start();
+  } catch {
+    tipEl.textContent = '⌨️ Keyboard only';
+    document.getElementById('cambox').style.display = 'none';
+  }
+})();
+</script>
+</body>
+</html>
